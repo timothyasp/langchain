@@ -28,29 +28,36 @@ class IFixitLoader(BaseLoader):
 
         path = web_path.replace("https://www.ifixit.com", "")
 
-        allowed_paths = ["/Device", "/Guide", "/Answers", "/Teardown"]
+        allowed_paths = ["/Device", "/Guide", "/Teardown", "/Wiki", "/Answers"]
 
         """ TODO: Add /Wiki """
         if not any(path.startswith(allowed_path) for allowed_path in allowed_paths):
             raise ValueError(
-                "web path must start with /Device, /Guide, /Teardown or /Answers"
+                "web path must start with /Device, /Guide, /Teardown, /Wiki, or /Answers"
             )
 
         pieces = [x for x in path.split("/") if x]
 
         """Teardowns are just guides by a different name"""
         self.page_type = pieces[0] if pieces[0] != "Teardown" else "Guide"
-
         if self.page_type == "Guide" or self.page_type == "Answers":
             self.id = pieces[2]
         else:
             self.id = pieces[1]
 
+        # print("Loading: " + self.page_type + " " + self.id)
+
         self.web_path = web_path
 
     def load(self) -> List[Document]:
         if self.page_type == "Device":
-            return self.load_device()
+            return self.load_wiki(
+                namespace="CATEGORY", include_guides=True, include_wikis=True
+            )
+        elif self.page_type == "Wiki":
+            return self.load_wiki(
+                namespace="WIKI", include_guides=False, include_wikis=False
+            )
         elif self.page_type == "Guide" or self.page_type == "Teardown":
             return self.load_guide()
         elif self.page_type == "Answers":
@@ -78,7 +85,9 @@ class IFixitLoader(BaseLoader):
             try:
                 loader = IFixitLoader(result["url"])
                 if loader.page_type == "Device":
-                    output += loader.load_device(include_guides=False)
+                    output += loader.load_wiki(
+                        namespace="CATEGORY", include_guides=False, include_wikis=False
+                    )
                 else:
                     output += loader.load()
             except ValueError:
@@ -119,12 +128,16 @@ class IFixitLoader(BaseLoader):
 
         return [Document(page_content=text, metadata=metadata)]
 
-    def load_device(
-        self, url_override: Optional[str] = None, include_guides: bool = True
+    def load_wiki(
+        self,
+        url_override: Optional[str] = None,
+        namespace: str = "CATEGORY",
+        include_guides: bool = True,
+        include_wikis: bool = True,
     ) -> List[Document]:
         documents = []
         if url_override is None:
-            url = IFIXIT_BASE_URL + "/wikis/CATEGORY/" + self.id
+            url = IFIXIT_BASE_URL + "/wikis/" + namespace + "/" + self.id
         else:
             url = url_override
 
@@ -147,6 +160,12 @@ class IFixitLoader(BaseLoader):
             for guide_url in guide_urls:
                 documents.append(IFixitLoader(guide_url).load()[0])
 
+        if include_wikis:
+            """Load and return documents for each guide linked to from the device"""
+            wiki_urls = [wiki["url"] for wiki in data["related_wikis"]]
+            for wiki_url in wiki_urls:
+                documents.append(IFixitLoader(wiki_url).load()[0])
+
         return documents
 
     def load_guide(self, url_override: Optional[str] = None) -> List[Document]:
@@ -166,19 +185,31 @@ class IFixitLoader(BaseLoader):
 
         doc_parts = ["# " + data["title"], data["introduction_raw"]]
 
+        if data["difficulty"] is not None:
+            doc_parts.append("\n\n###Difficulty: " + data["difficulty"])
+        if data["time_required"] is not None:
+            doc_parts.append("\n\n###Time required: " + data["time_required"])
+
         doc_parts.append("\n\n###Tools Required:")
         if len(data["tools"]) == 0:
             doc_parts.append("\n - None")
         else:
             for tool in data["tools"]:
-                doc_parts.append("\n - " + tool["text"])
+                doc_parts.append(
+                    "\n - " + tool["text"] + ": " + tool["url"]
+                    if tool["url"] is not None
+                    else ""
+                )
 
         doc_parts.append("\n\n###Parts Required:")
         if len(data["parts"]) == 0:
             doc_parts.append("\n - None")
         else:
             for part in data["parts"]:
-                doc_parts.append("\n - " + part["text"])
+                quantity = (
+                    " (x" + str(part["quantity"]) + ")" if part["quantity"] > 1 else ""
+                )
+                doc_parts.append("\n - " + part["text"] + quantity + ": " + part["url"])
 
         for row in data["steps"]:
             doc_parts.append(
